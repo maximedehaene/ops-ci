@@ -1,0 +1,62 @@
+# DISABLED STUB (spec only). Reusable CI, published in public ops-ci (ADR-0018).
+# No job references a secret. Callers pin this file by full commit SHA.
+name: ci
+on:
+  workflow_call:
+    inputs:
+      service:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "TODO B05: checkout; load ci/dummy.env key by key (never source); run repo tests"
+  gitleaks:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "TODO B05: gitleaks CLI on the PR diff; full history on first run"
+  rule3-grep:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "TODO B05: wire scripts/check_script_rules.sh (done in B04) on the caller's scripts/*.sh"
+  old-wording-grep:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "TODO B05: wire scripts/check_old_wording.sh (done in B04; list checks/old-wording.txt, excluded from the scan)"
+  diff-stat:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "TODO B05: wire scripts/diffstat.sh BASE HEAD --summary (done in B04)"
+  risk-classify:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "TODO B03: advisory display label on PRs only; the effective class is computed by the Pi (ADR-0010)"
+  report-check:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "TODO B05: wire scripts/check_report.sh docs/reports/*.md (done in B04)"
+  script-stub-tests:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "TODO B10: tests/stub/run.sh directly and via bash heredoc; rollback against simulated old checkout"

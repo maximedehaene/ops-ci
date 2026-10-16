@@ -1,0 +1,6 @@
+# Domains that may appear in reports and in the published ops-ci tree (check_report.sh, spec section 10).
+# One entry per line: <domain> | <reason>. The reason is required. A leading "*." allows subdomains of a domain
+# with at least two labels, never a whole top-level domain. Lower case only. There is deliberately no entry for any
+# code-hosting site: a name that appears here must be needed by a file in the tree, so add the entry in the same
+# change that adds the name.
+example.invalid | reserved by RFC 2606 for examples and tests; resolves nowhere

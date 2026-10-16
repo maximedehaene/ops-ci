@@ -1,0 +1,36 @@
+# DISABLED STUB (spec only). Reusable push-to-main job, published in public ops-ci (ADR-0005, ADR-0018).
+# Checks provenance only and opens the deploy issue with before..after. No risk classification here:
+# the Pi computes the effective risk itself (ADR-0010).
+name: on-main
+on:
+  workflow_call:
+    inputs:
+      service:
+        type: string
+        required: true
+      before:
+        type: string
+        required: true
+      after:
+        type: string
+        required: true
+    secrets:
+      OPENER_APP_ID:
+        required: true
+      OPENER_APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  provenance-open:
+    if: false && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "TODO B11: inputs.before/after must be 40 hex; before must be an ancestor of after (fast-forward)"
+          echo "TODO B11: for each commit in before..after: merge_commit_sha of a PR merged by maximedehaene (not a bot), or listed in vouched_shas"
+          echo "TODO B11: violation -> mint opener token (ops only) -> issue labels needs-maxime + pause-pi; open NO deploy issue; stop"
+          echo "TODO B11: else open deploy issue: fenced block {repo, before, after, event_checks}; event_checks = IDs from merged PRs' 'Event-checks:' lines matching ^[a-z0-9-]+$ (validated later by verifier.yml); body via jq --arg"

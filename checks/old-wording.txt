@@ -1,0 +1,13 @@
+# Retired phrasings (decision 14 "old-wording grep"), as supplied on 11/10.
+# One extended regex per line, matched case-insensitively; spaces also match hyphens.
+# This file is excluded from the scan.
+\bone[ -]live[ -]change\b
+\blive[ -]change[ -]per[ -]day\b
+\bone[ -]change[ -]per[ -]day\b
+\bone[ -]pi[ -]change\b
+\bone[ -]service[ -]per[ -]day\b
+\bseparate[ -]days\b
+\bown[ -]day\b
+\bonly[ -]change[ -]that[ -]day\b
+\bonly[ -]pi[ -]change[ -]that[ -]day\b
+\bno[ -]other[ -]live[ -]change\b

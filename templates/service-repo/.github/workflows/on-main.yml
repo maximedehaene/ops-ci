@@ -1,0 +1,30 @@
+# DISABLED TEMPLATE (spec only). Runs on push to main; manual dispatch only by maximedehaene from main
+# to bridge a chain gap (recovery runbook section 7a). The only service-repo job with a secret.
+name: on-main
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      before:
+        description: "40-hex start of the range to bridge"
+        required: true
+      after:
+        description: "40-hex end of the range to bridge"
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  on-main:
+    if: false && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event.sender.login == 'maximedehaene')
+    uses: maximedehaene/ops-ci/.github/workflows/on-main.yml@TODO-PINNED-40-HEX-SHA
+    with:
+      service: TODO-service-name
+      before: ${{ github.event_name == 'push' && github.event.before || inputs.before }}
+      after: ${{ github.event_name == 'push' && github.event.after || inputs.after }}
+    secrets:
+      OPENER_APP_ID: ${{ secrets.OPENER_APP_ID }}
+      OPENER_APP_PRIVATE_KEY: ${{ secrets.OPENER_APP_PRIVATE_KEY }}
