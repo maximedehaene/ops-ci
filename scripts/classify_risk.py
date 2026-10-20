@@ -39,17 +39,54 @@ Output: the VERDICT line, then a fenced block of fixed fields, nothing after it 
 
 Rules (spec §7). Findings only ever raise the class; when a rule cannot be decided it is treated as hit.
   HIGH:   github (a path under .github/), first-deploy, auth (auth, grants, permissions or the registry, by path
-          or changed line; also a service whose venv or affects names client-registry)
+          or changed line; also a service whose venv or affects names client-registry), shared-unit and
+          shared-container (command rules, below), range-too-large (the range is over the scan cap)
   not LOW (MEDIUM unless HIGH): unit-file, privilege (sudoers, user, group), secret-env (secret or env-name
           change), migration, rollback-not-scripted (no scripts/rollback.sh at T), rollback-ci (not pass),
-          multi-service (affects is not empty), unknown-affects (affects holds TODO)
+          multi-service (affects is not empty), unknown-affects (affects holds TODO), unit-restart and
+          container-restart (command rules, below)
   hard rule, no override, never LOW: shared (shared: true), shared-resource (venv or affects names a
           shared_resources entry), shared-venv (venv names another service, or another service's venv names
           this one), shared-venv-unknown (this or any other service's venv is TODO)
 
+Command rules (spec §7, "Restarting units and containers"). A changed line (added or removed, any file) is read for
+  systemctl, docker, podman, docker-compose and podman-compose commands. Lines are joined over a trailing backslash (no
+  space) or comma, and a line that starts with + goes on the line before it (Black layout). Quotes, [ ] and commas are
+  dropped, / and = split words (an --option=value stays one word), ; & | ( ) < > and backticks end a command, # starts
+  a comment, so sudo, a path, an Exec prefix (- @ + !), a shell wrapper, a here-doc or list-form argv does not hide a
+  command. A list-form argv ends at the "]" that closes the outermost "[" opened before the command word and is
+  followed by ")" or "}", by "," and a keyword argument (name=) or a closing ) or }; the end of the text is not
+  an end (a read window that was cut looks like the end of the line, and a read that did not end counts as cut); a
+  "]" followed by anything else ([:], * 1, +, .method, ", [" for another list) does not end it, and with no "[" before
+  the command word nothing ends it (over-flag). A word is split on commas and quotes
+  first: [d]ocker or docke[r] in a piece is a glob; a piece with a name followed by an index (UNITS[i],
+  ${UNITS[$i]}.service, UNITS[i].name) is a name picked at run time and counts as shared. Not read (Known limits in
+  spec §7): a tuple or "cmd +=" built on a later line, ( ) around the argv, .__add__([...]) (MEDIUM at most), a dict
+  literal indexed at once, " ".join([...]) + "x", shlex.join(...), list([...]) + [...] (LOW or MEDIUM), a quoted index
+  key (UNITS["cf"], MEDIUM).
+  systemctl: verbs start stop restart reload try-restart reload-or-restart try-reload-or-restart reload-or-try-restart
+    force-reload condrestart kill, and enable reenable disable mask preset together with --now. Per unit named: named
+    like a shared_resources entry (ignoring - _ . and case, a template instance counts as its template; checked before
+    the service's own units); or a glob that fnmatch-matches an entry, the entry plus .service, or the
+    entry plus - _ or . and a character; or an index (UNITS[i]); or listed by a shared service or by two services;
+    or an entry followed by - _ . and not an own unit -> shared-unit. An exact own unit (no suffix means .service), or
+    an instance of an own template -> nothing. Anything else, or no name -> unit-restart. A command not read to its
+    end (over the read window) or a line over the command-word cap -> shared-unit.
+  containers: docker, podman, docker-compose, podman-compose, "docker compose"; verbs restart stop kill rm down start
+    pause unpause, up with --force-recreate, update with --restart (also after "container"). A shared name -> shared-
+    container; any other name -> container-restart. Also shared-container: no service name left after the options and
+    their values (the whole compose project, or names fed by xargs), --all or -a (for start, -a is --attach and is
+    ignored), $( ) in place of a name, a command not read to its end. The first word after --attach, --no-attach and
+    --exit-code-from is a compose service name, but it is skipped as an option value (MEDIUM is an estimate: the
+    compose documentation does not settle which it is).
+
+Scan cap: the patch text of D..T that is read is capped at MAX_SCAN_BYTES (below). Over it, git is stopped, the lines
+  are not scanned and the finding range-too-large (HIGH) is added: a range too big to read is never lower than HIGH.
+
 May call: git (show, cat-file, rev-parse, merge-base, rev-list, log) with stdin from /dev/null, read-only.
 Requires python3 >= 3.7 and git. Standard library only.
 """
+import fnmatch
 import os
 import re
 import subprocess
@@ -90,7 +127,42 @@ LINE_RULES = [
     ("secret-env", re.compile(r"os\.environ|getenv|process\.env|\bEnvironment(File)?\s*=|LoadCredential|CREDENTIALS_DIRECTORY|\bsecrets?\b", I)),
     ("migration", re.compile(r"\b(alter|create|drop)\s+(table|index|view)\b|pragma\s+user_version", I)),
 ]
-HIGH = {"github", "first-deploy", "auth"}
+HIGH = {"github", "first-deploy", "auth", "shared-unit", "shared-container", "range-too-large"}
+
+# The one place the scan cap is set: bytes of `git log -p` output read for D..T (what the line rules scan, deleted
+# and added bytes both counted). 16 MiB is under the 20 MB binary that was measured at 4.5 to 7.5 s and about 100 MB
+# RSS (no cap: 100 MB took about 35 s and 470 MB), so a capped scan stays near 5 s and 80 MB on that machine; text
+# diffs of a deploy are far smaller. Over it the range is HIGH (finding range-too-large), never a lower class.
+MAX_SCAN_BYTES = 16 * 1024 * 1024
+
+# Command rule tables (spec §7). Verbs that stop, start, restart or signal a unit; the second group only with --now.
+SYSTEMCTL_VERBS = ("start", "stop", "restart", "reload", "try-restart", "reload-or-restart", "try-reload-or-restart",
+                   "reload-or-try-restart", "force-reload", "condrestart", "kill")
+SYSTEMCTL_NOW_VERBS = ("enable", "reenable", "disable", "mask", "preset")
+SYSTEMCTL_VALUE_OPTS = ("-s", "--signal", "--kill-whom", "-H", "--host", "-M", "--machine", "-p", "--property",
+                        "-t", "--type", "--state", "-n", "--lines", "-o", "--output", "--kill-value")
+CONTAINER_VERBS = ("restart", "stop", "kill", "rm", "down", "up", "start", "pause", "unpause", "update")
+# Options before the verb that take a value (docker and compose global options), and per verb the options after it
+# that take a value (the number is how many words they take: --scale web=2 is two). A value is never a container.
+CONTAINER_GLOBAL_VALUE_OPTS = ("-H", "--host", "-c", "--context", "--config", "-l", "--log-level", "-f", "--file", "-p",
+                               "--project-name", "--profile", "--env-file", "--project-directory", "--ansi",
+                               "--parallel", "--progress")
+_TIME = {"-t": 1, "--time": 1, "--timeout": 1}
+_SIG = {"-s": 1, "--signal": 1}
+CONTAINER_VERB_VALUE_OPTS = {
+    "restart": dict(_TIME, **_SIG), "stop": dict(_TIME, **_SIG), "kill": dict(_SIG),
+    "down": dict(_TIME, **{"--rmi": 1}),
+    "up": dict(_TIME, **{"--wait-timeout": 1, "--pull": 1, "--scale": 2, "--exit-code-from": 1, "--attach": 1,
+                         "--no-attach": 1}),
+    "update": {"--restart": 1, "--blkio-weight": 1, "--cpu-period": 1, "--cpu-quota": 1, "--cpu-rt-period": 1,
+               "--cpu-rt-runtime": 1, "-c": 1, "--cpu-shares": 1, "--cpus": 1, "--cpuset-cpus": 1,
+               "--cpuset-mems": 1, "-m": 1, "--memory": 1, "--memory-reservation": 1, "--memory-swap": 1,
+               "--pids-limit": 1},
+}
+UNIT_SUFFIX = re.compile(r"\.(service|timer|socket|path|mount|target|slice|scope|device|swap|automount)$")
+CMD_START = re.compile(r"(?<![A-Za-z0-9_])(?:systemctl|docker|podman)")
+CMD_WINDOW = 8192      # characters read after each command word; a longer command is treated as undecidable
+CMD_MAX_PER_LINE = 2000
 
 
 class Refused(Exception):
@@ -120,6 +192,32 @@ def git(repo, args, op):
     if p.returncode != 0:
         raise Refused("git", op)
     return p.stdout
+
+
+def git_capped(repo, args, op, cap):
+    """Like git(), but stdout is read in chunks and git is killed once more than `cap` bytes arrived; returns None then."""
+    try:
+        p = subprocess.Popen(["git", "-C", repo, "-c", "core.quotepath=off"] + args, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=GIT_ENV)
+    except OSError:
+        raise Refused("git", op)
+    chunks, size = [], 0
+    try:
+        while True:
+            chunk = p.stdout.read(65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > cap:
+                p.kill()
+                return None
+            chunks.append(chunk)
+    finally:
+        p.stdout.close()
+        rc = p.wait()
+    if rc != 0:
+        raise Refused("git", op)
+    return b"".join(chunks)
 
 
 # ---- services.yaml: a strict subset of YAML, parsed without a YAML library ----
@@ -285,25 +383,239 @@ def validate(services, order, shared):
 
 # ---- range inspection ----
 
+def join_parts(parts):
+    return " ".join(parts).replace("\x1f ", "")      # a last \x1f stays: it is whitespace to split() and \s
+
+
 def changed(repo_dir, d, t):
     """Paths and changed lines over every commit in d..t, not only the net diff: a change made and reverted
     inside the range still counts. -m shows a merge commit against each parent, so a change made in the merge
-    itself is seen. --text scans files that attributes (-diff, binary) or content would mark as binary."""
-    names = git(repo_dir, ["log", "-m", "--no-renames", "--format=", "--name-only", "-z", "%s..%s" % (d, t)], "log")
+    itself is seen. --text scans files that attributes (-diff, binary) or content would mark as binary.
+    Returns (paths, lines, commands, too_large); commands are the lines with backslash continuations joined; too_large is True when either git output passed MAX_SCAN_BYTES."""
+    names = git_capped(repo_dir, ["log", "-m", "--no-renames", "--format=", "--name-only", "-z", "%s..%s" % (d, t)],
+                       "log", MAX_SCAN_BYTES)
+    raw = None if names is None else git_capped(
+        repo_dir, ["log", "-m", "--text", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=0",
+                   "--format=%x00", "-p", "%s..%s" % (d, t)], "log", MAX_SCAN_BYTES)
+    if names is None or raw is None:
+        return set(), [], [], True
     paths = set(x.decode("utf-8", "replace").strip("\n") for x in names.split(b"\x00"))
     paths.discard("")
-    raw = git(repo_dir, ["log", "-m", "--text", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=0",
-                         "--format=%x00", "-p", "%s..%s" % (d, t)], "log")
-    lines, in_hunk = [], False
+    lines, cmds, in_hunk, parts, sign, done = [], [], False, [], "", False
     for b in raw.split(b"\n"):
         s = b.decode("utf-8", "replace")
-        if s.startswith("diff --git ") or s.startswith("\x00"):
-            in_hunk = False
-        elif s.startswith("@@"):
-            in_hunk = True
+        if s.startswith("diff --git ") or s.startswith("\x00") or s.startswith("@@"):
+            if parts:
+                cmds.append(join_parts(parts))
+            in_hunk, parts = s.startswith("@@"), []
         elif in_hunk and s[:1] in ("+", "-"):
-            lines.append(s[1:])
-    return paths, lines
+            text = s[1:]
+            lines.append(text)
+            if parts and (sign != s[0] or (done and not text.lstrip().startswith("+"))):
+                cmds.append(join_parts(parts))      # a finished command goes on only over a line that starts with + (Black layout)
+                parts = []
+            t = text.rstrip()
+            parts.append(t[:-1] + "\x1f" if t.endswith("\\") else text)   # \x1f: join the next line with no space
+            sign = s[0]
+            # a command goes on over a trailing backslash, and over a trailing comma (a list of argv words, one a line)
+            done = not t.endswith(("\\", ","))
+    if parts:
+        cmds.append(join_parts(parts))
+    return paths, lines, cmds, False
+
+
+def is_shared_service(k, services, shared):
+    s = services[k]
+    return (s.get("shared") == "true" or k in shared or bool((set(s.get("affects", [])) | {s.get("venv")}) & set(shared))
+            or any(o != k and services[o].get("venv") == k for o in services))
+
+
+def norm(x):
+    return re.sub(r"[-_.]", "", x.lower())
+
+
+GLOB = re.compile(r"[*?\[]")
+INDEXED = re.compile(r"\w\[[^\[\]]+\]")    # UNITS[i], ${UNITS[$i]}.service, UNITS[i].name: a name picked at run time from a collection
+GLOB_CLASS = re.compile(r"\w\[[^\[\]\"',\s]+\]|\[[^\[\]\"',\s]+\]\w")    # [d]ocker, docke[r]: not a list of argv
+
+
+def shared_match(name, shared, exact=False):
+    """True when `name` (a unit, container or compose service name) is a shared resource: equal to a shared_resources
+    entry (ignoring - _ and .), or starting with <entry>- <entry>_ or <entry>.; a glob, also of a template
+    (name@*), is matched against the entries with fnmatch; a name ending in an index (UNITS[i]) is always shared:
+    which one is picked is not known."""
+    n = name.lower()
+    res = [e.lower() for e in shared]
+    base = UNIT_SUFFIX.sub("", n)
+    if GLOB.search(n):
+        pat = base.split("@")[0]       # name@* is matched on name: the entries are plain names
+        forms = [c for e in res for c in (e, e + ".service", e + "-x", e + "_x", e + ".x")]   # an entry, or a name starting with it
+        return bool(INDEXED.search(n)) or any(fnmatch.fnmatchcase(c, pat) for c in forms)
+    head = base.split("@")[0]
+    return any(norm(head) == norm(e) or (not exact and head.startswith((e + "-", e + "_", e + "."))) for e in res)
+
+
+def unit_finding(arg, svc, services, shared):
+    """Finding for one unit named after a systemctl verb: shared-unit, unit-restart or None (the service's own)."""
+    arg = arg.replace("\\", "")      # in a shell, \c is c
+    if GLOB.search(arg):
+        return "shared-unit" if shared_match(arg, shared) else "unit-restart"
+    u = arg if UNIT_SUFFIX.search(arg) else arg + ".service"
+    head = UNIT_SUFFIX.sub("", u)
+    suffix = u[len(head):]
+    base = head.split("@")[0]
+    tmpl = base + "@" + suffix if "@" in head else u        # name@x.service is an instance of name@.service
+    if shared_match(u, shared, exact=True):     # before own: a unit named like a shared resource is shared
+        return "shared-unit"
+    listed = [o for o in services if {u, tmpl} & set(services[o].get("units", []))]
+    if len(listed) > 1 or any(o != svc and is_shared_service(o, services, shared) for o in listed):
+        return "shared-unit"
+    if listed:      # before the owner of the plain name: a unit another service lists is that service's, not an instance of this one
+        if svc in listed:
+            return None
+    elif base + suffix in set(services[svc].get("units", [])):     # an instance of a template whose plain unit is its own
+        return None
+    return "shared-unit" if shared_match(u, shared) else "unit-restart"
+
+
+def container_finding(name, shared):
+    name = name.replace("\\", "")
+    return "shared-container" if shared_match(name, shared) else "container-restart"
+
+
+LIST_CLOSE = re.compile(r",\s*(\w+\s*=[^=]|[)}])")      # , keyword=... or , ) : the next argument is not another list
+
+
+def list_end(text, opened):
+    """Index of the "]" that ends a list-form argv, or len(text). The list ends at the "]" that brings the depth of the
+    `opened` "[" that were open before the command word back to 0 and is followed by ")" or "}", by "," and a keyword
+    argument (name=) or a closing ) or }. ][:], ] * 1, ].__add__(, + and ", [" (another list as an argument) go on, as
+    does a "]" inside a nested list. The end of the text is not an end: a window that was cut at CMD_WINDOW looks like
+    the end of the line, and the caller treats a read that did not end as cut (an over-flag); where the text really ends
+    there is nothing more to read. With none open before the command word, nothing ends it (over-flag)."""
+    depth = opened
+    for i, c in enumerate(text):
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if opened and depth <= 0:
+                after = text[i + 1:].lstrip()
+                if after[:1] in (")", "}") or LIST_CLOSE.match(after):
+                    return i
+    return len(text)
+
+
+def command_tokens(text, opened=0):
+    """Tokens of the first command in `text`: ; & | ( ) < > and backticks end a token and a command, quotes, [ ] and
+    commas are dropped (so list-form argv reads as words) and the list ends at its closing ] (see list_end), / and =
+    split a word (an --option=value stays one word), a # starts a comment; [d]ocker or UNITS[i] inside a piece
+    (a word between commas and quotes) is a glob and stays."""
+    end = list_end(text, opened)
+    t = re.sub(r"(?<!\S)[&0-9]*[<>]+&?[0-9-]*", " ; ", text[:end].replace("`", " ; "))
+    t = re.sub(r"[;&|()<>]", " ; ", t)
+    out = []
+    for raw in t.split():
+        if raw == ";" or raw.startswith("#"):
+            return out, True
+        for piece in re.split(r"[\"',]", raw):
+            words = [piece] if GLOB_CLASS.search(piece) else re.sub(r"[\[\]]", " ", piece).split()
+            for p in words:
+                if p.startswith("-") and "=" in p:
+                    out.append(p)
+                else:
+                    out.extend(x for x in re.split(r"[=/]", p) if x)
+    return out, end < len(text)
+
+
+def systemctl_args(toks):
+    """Unit names after the verb of a systemctl command, or None when the verb does not stop, start or signal a unit."""
+    verb = [i for i, x in enumerate(toks) if x in SYSTEMCTL_VERBS or (x in SYSTEMCTL_NOW_VERBS and "--now" in toks)]
+    if not verb:
+        return None
+    names, skip = [], False
+    for x in toks[verb[0] + 1:]:
+        if skip:
+            skip = False
+        elif x in SYSTEMCTL_VALUE_OPTS:
+            skip = True
+        elif not x.startswith("-"):
+            names.append(x)
+    return names
+
+
+def container_args(toks):
+    """(names, bulk) after the verb of a docker/podman/compose command, or None when it is not an acting
+    verb (restart, stop, kill, rm, down, start, pause, unpause, up --force-recreate, update --restart). bulk: --all,
+    -a, or a $( ) command substitution in place of a name."""
+    v, i = None, 0
+    while i < len(toks):
+        if toks[i] in CONTAINER_GLOBAL_VALUE_OPTS:
+            i += 2
+            continue
+        if toks[i] in CONTAINER_VERBS:
+            v = i
+            break
+        i += 1
+    if v is None:
+        return None
+    verb, rest = toks[v], toks[v + 1:]
+    if verb == "up" and not any(x.startswith("--force-recreate") for x in rest):
+        return None
+    if verb == "update" and not any(x.startswith("--restart") for x in rest):
+        return None
+    opts = CONTAINER_VERB_VALUE_OPTS.get(verb, {})
+    names, bulk, i = [], False, 0
+    while i < len(rest):
+        x = rest[i]
+        i += 1
+        if x in opts:
+            i += opts[x]
+        elif x.startswith("-"):
+            # -a is --attach for start: only the other verbs take it for every container
+            bulk = bulk or x == "--all" or bool(verb != "start" and re.fullmatch(r"-[A-Za-z]+", x) and "a" in x[1:])
+        elif x == "$":
+            bulk = True
+        else:
+            names.append(x)
+    return names, bulk
+
+
+def command_findings(line, svc, services, shared):
+    """Findings for every systemctl, docker, podman or compose command on one changed line (header: command rules)."""
+    found, n = set(), 0
+    for m in CMD_START.finditer(line):
+        n += 1
+        if n > CMD_MAX_PER_LINE:
+            found.add("shared-unit")        # words that were not read could name anything
+            break
+        exe = m.group(0)
+        window = line[m.start():m.start() + CMD_WINDOW]
+        before = line[:m.start()]
+        toks, ended = command_tokens(window, max(0, before.count("[") - before.count("]")))
+        cut = not ended and m.start() + CMD_WINDOW < len(line)
+        if exe == "systemctl":
+            names = systemctl_args(toks[1:])
+            if names is None:
+                continue
+            if cut:
+                found.add("shared-unit")    # the rest of the command was not read
+            if not names:
+                found.add("unit-restart")
+            for a in names:
+                f = unit_finding(a, svc, services, shared)
+                if f:
+                    found.add(f)
+        else:
+            r = container_args(toks[1:])
+            if r is None:
+                continue
+            names, bulk = r
+            if cut or bulk or not names:        # no name: the whole compose project, or names fed by xargs or stdin
+                found.add("shared-container")
+            for a in names:
+                found.add(container_finding(a, shared))
+    return found
 
 
 def classify(args, services, shared):
@@ -351,8 +663,8 @@ def classify(args, services, shared):
         raise Refused("range", "not-ancestor")
     commits = int(git(rd, ["rev-list", "--count", "%s..%s" % (d, t)], "rev-list").strip() or b"0")
 
-    paths, lines = changed(rd, d, t)
-    found = set()
+    paths, lines, cmds, too_large = changed(rd, d, t)
+    found = set(["range-too-large"] if too_large else [])
     units = set(s.get("units", [])) - {"TODO"}
     for p in paths:
         for name, rx in PATH_RULES:
@@ -364,6 +676,8 @@ def classify(args, services, shared):
         for name, rx in LINE_RULES:
             if rx.search(ln):
                 found.add(name)
+    for ln in cmds:
+        found |= command_findings(ln, svc, services, shared)
     if first == "yes":
         found.add("first-deploy")
     try:
@@ -394,7 +708,7 @@ def classify(args, services, shared):
 
     risk = "HIGH" if found & HIGH else ("MEDIUM" if found else "LOW")
     return [("mode", "classify"), ("risk", risk), ("service", svc), ("repo", s["repo"]), ("kind", s["kind"]),
-            ("range", "%s..%s" % (d, t)), ("commits", commits), ("files", len(paths)),
+            ("range", "%s..%s" % (d, t)), ("commits", commits), ("files", "unknown" if too_large else len(paths)),
             ("first_deploy", first), ("rollback_ci", rb), ("findings", ",".join(sorted(found)) or "none"),
             ("ops_ref", args["--ops-ref"])]
 

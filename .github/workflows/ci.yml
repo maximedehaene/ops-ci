@@ -1,5 +1,7 @@
-# DISABLED STUB (spec only). Reusable CI, published in public ops-ci (ADR-0018).
-# No job references a secret. Callers pin this file by full commit SHA.
+# Reusable CI, published in public ops-ci (ADR-0018). Callers pin this file by full commit SHA and pass the same SHA as
+# ops-ci-ref, which this workflow uses to fetch the scripts it runs (the file cannot see its own ref). No job references a secret.
+# Jobs rule3-grep, old-wording-grep, diff-stat and report-check run (build plan B05); the others are disabled stubs (`if: false`)
+# until the item named in each TODO.
 name: ci
 on:
   workflow_call:
@@ -7,6 +9,20 @@ on:
       service:
         type: string
         required: true
+      ops-ci-ref:
+        description: full 40-hex commit SHA of ops-ci; must be the SHA this file is called at
+        type: string
+        required: true
+      script-globs:
+        description: git pathspecs (blank separated, no spaces inside a path) of the shell scripts rule3-grep checks
+        type: string
+        required: false
+        default: 'scripts/*.sh'
+      wording-exclude:
+        description: paths (blank separated) old-wording-grep skips, besides the ops-ci checkout
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -17,31 +33,103 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "TODO B05: checkout; load ci/dummy.env key by key (never source); run repo tests"
+          echo "TODO later (not in the B05 row): checkout; load ci/dummy.env key by key (never source); run repo tests"
   gitleaks:
     if: false
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "TODO B05: gitleaks CLI on the PR diff; full history on first run"
+          echo "TODO later (not in the B05 row): gitleaks CLI on the PR diff; full history on first run"
   rule3-grep:
-    if: false
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - run: |
-          echo "TODO B05: wire scripts/check_script_rules.sh (done in B04) on the caller's scripts/*.sh"
+      - name: ops-ci-ref is a full SHA
+        env:
+          REF: ${{ inputs.ops-ci-ref }}
+        run: |
+          # the whole value, not a line of it: a value with a newline in it is refused
+          if [ "${#REF}" != 40 ] || [ -n "${REF//[0123456789abcdef]/}" ]; then echo "ops-ci-ref must be a full 40-hex commit SHA"; exit 1; fi
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Fetch the scripts at ops-ci-ref
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: maximedehaene/ops-ci
+          ref: ${{ inputs.ops-ci-ref }}
+          path: .ops-ci
+          persist-credentials: false
+      - name: rule-3 grep on the caller's scripts
+        env:
+          GLOBS: ${{ inputs.script-globs }}
+        run: |
+          set -euf
+          # shellcheck disable=SC2086
+          files=$(git ls-files -- $GLOBS </dev/null)
+          [ -n "$files" ] || { echo "no script matches $GLOBS: nothing to check"; exit 0; }
+          # shellcheck disable=SC2086
+          bash .ops-ci/scripts/check_script_rules.sh $files
   old-wording-grep:
-    if: false
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - run: |
-          echo "TODO B05: wire scripts/check_old_wording.sh (done in B04; list checks/old-wording.txt, excluded from the scan)"
+      - name: ops-ci-ref is a full SHA
+        env:
+          REF: ${{ inputs.ops-ci-ref }}
+        run: |
+          # the whole value, not a line of it: a value with a newline in it is refused
+          if [ "${#REF}" != 40 ] || [ -n "${REF//[0123456789abcdef]/}" ]; then echo "ops-ci-ref must be a full 40-hex commit SHA"; exit 1; fi
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Fetch the scripts at ops-ci-ref
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: maximedehaene/ops-ci
+          ref: ${{ inputs.ops-ci-ref }}
+          path: .ops-ci
+          persist-credentials: false
+      - name: retired phrasings (list checks/old-wording.txt of ops-ci)
+        env:
+          EXCLUDE: ${{ inputs.wording-exclude }}
+        run: |
+          set -euf
+          args="--exclude .ops-ci"
+          # shellcheck disable=SC2086
+          for p in $EXCLUDE; do args="$args --exclude $p"; done
+          # shellcheck disable=SC2086
+          bash .ops-ci/scripts/check_old_wording.sh $args .
   diff-stat:
-    if: false
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - run: |
-          echo "TODO B05: wire scripts/diffstat.sh BASE HEAD --summary (done in B04)"
+      - name: ops-ci-ref is a full SHA
+        env:
+          REF: ${{ inputs.ops-ci-ref }}
+        run: |
+          # the whole value, not a line of it: a value with a newline in it is refused
+          if [ "${#REF}" != 40 ] || [ -n "${REF//[0123456789abcdef]/}" ]; then echo "ops-ci-ref must be a full 40-hex commit SHA"; exit 1; fi
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Fetch the scripts at ops-ci-ref
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: maximedehaene/ops-ci
+          ref: ${{ inputs.ops-ci-ref }}
+          path: .ops-ci
+          persist-credentials: false
+      - name: counts of the change to the job summary
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          base=$(git merge-base "$BASE_SHA" "$HEAD_SHA" </dev/null)
+          bash .ops-ci/scripts/diffstat.sh "$base" "$HEAD_SHA" --summary "$GITHUB_STEP_SUMMARY"
   risk-classify:
     if: false
     runs-on: ubuntu-latest
@@ -49,11 +137,32 @@ jobs:
       - run: |
           echo "TODO B03: advisory display label on PRs only; the effective class is computed by the Pi (ADR-0010)"
   report-check:
-    if: false
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - run: |
-          echo "TODO B05: wire scripts/check_report.sh docs/reports/*.md (done in B04)"
+      - name: ops-ci-ref is a full SHA
+        env:
+          REF: ${{ inputs.ops-ci-ref }}
+        run: |
+          # the whole value, not a line of it: a value with a newline in it is refused
+          if [ "${#REF}" != 40 ] || [ -n "${REF//[0123456789abcdef]/}" ]; then echo "ops-ci-ref must be a full 40-hex commit SHA"; exit 1; fi
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Fetch the scripts at ops-ci-ref
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: maximedehaene/ops-ci
+          ref: ${{ inputs.ops-ci-ref }}
+          path: .ops-ci
+          persist-credentials: false
+      - name: front matter and body-sha256 of docs/reports/*.md
+        run: |
+          set -euf
+          files=$(git ls-files -- 'docs/reports/*.md' </dev/null)
+          [ -n "$files" ] || { echo "no report in docs/reports: nothing to check"; exit 0; }
+          # shellcheck disable=SC2086
+          bash .ops-ci/scripts/check_report.sh $files
   script-stub-tests:
     if: false
     runs-on: ubuntu-latest

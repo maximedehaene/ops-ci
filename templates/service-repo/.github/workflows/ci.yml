@@ -1,4 +1,4 @@
-# DISABLED TEMPLATE (spec only). Copy into each service repo; replace the pin with ops/ops-ci.pin.
+# DISABLED TEMPLATE (spec only). Copy into each service repo; replace both pins (the @ref and ops-ci-ref) with the SHA in ops/ops-ci.pin.
 name: ci
 on:
   pull_request:
@@ -14,3 +14,4 @@ jobs:
     uses: maximedehaene/ops-ci/.github/workflows/ci.yml@TODO-PINNED-40-HEX-SHA
     with:
       service: TODO-service-name
+      ops-ci-ref: TODO-PINNED-40-HEX-SHA
